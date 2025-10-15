@@ -201,21 +201,38 @@ class CustomDPOTrainer(DPOTrainer):
         if self.finetuning_args.use_ref_model:
             batch = nested_detach(batch, clone=True)  # avoid error
 
-        if is_torch_hpu_available():
-            htcore.mark_step()
-        all_logits: torch.Tensor = model(**batch, return_dict=True, use_cache=False).logits.to(torch.float32)
-        if is_torch_hpu_available():
-            htcore.mark_step()
-        all_logps, valid_length = get_batch_logps(
-            logits=all_logits, labels=batch["labels"], ld_alpha=(self.ld_alpha if not is_ref_model else None)
-        )
-        if self.loss_type in ["ipo", "orpo", "simpo"]:
-            all_logps = all_logps / valid_length
+        logps_list = []
+        logits_list = []
+        length_list = []
+        for bs in range(batch["input_ids"].size(0)):
+            mini_batch = batch.copy()
+            mini_batch['input_ids'] = batch['input_ids'][bs:bs+1]
+            mini_batch['attention_mask'] = batch['attention_mask'][bs:bs+1]
+            mini_batch['labels'] = batch['labels'][bs:bs+1]
+            if is_torch_hpu_available():
+                htcore.mark_step()
+            all_logits: torch.Tensor = model(**mini_batch, return_dict=True, use_cache=False).logits.to(torch.float32)
+            if is_torch_hpu_available():
+                htcore.mark_step()
+            all_logps, valid_length = get_batch_logps(
+                logits=all_logits, labels=mini_batch["labels"], ld_alpha=(self.ld_alpha if not is_ref_model else None)
+            )
+            if self.loss_type in ["ipo", "orpo", "simpo"]:
+                all_logps = all_logps / valid_length
+            logps_list.append(all_logps)
+            logits_list.append(all_logits.mean())
+            length_list.append(valid_length)
 
-        batch_size = batch["input_ids"].size(0) // 2
-        chosen_logps, rejected_logps = all_logps.split(batch_size, dim=0)
-        chosen_logits, rejected_logits = all_logits.split(batch_size, dim=0)
-        chosen_length, _ = valid_length.split(batch_size, dim=0)
+        chosen_size = batch["input_ids"].size(0) // 2
+        chosen_logps = torch.cat(logps_list[:chosen_size], dim=0)
+        rejected_logps = torch.cat(logps_list[chosen_size:], dim=0)
+        chosen_logits=  torch.cat(logits_list[:chosen_size], dim=0)
+        rejected_logits = torch.cat(logits_list[chosen_size:], dim=0)
+        chosen_length = torch.cat(length_list[:chosen_size], dim=0)
+
+        # chosen_logps, rejected_logps = all_logps.split(batch_size, dim=0)
+        # chosen_logits, rejected_logits = all_logits.split(batch_size, dim=0)
+        # chosen_length, _ = valid_length.split(batch_size, dim=0)
 
         if self.loss_type in ["ipo", "orpo", "simpo"]:
             return chosen_logps, rejected_logps, chosen_logits, rejected_logits, chosen_logps
