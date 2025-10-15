@@ -42,6 +42,7 @@ if TYPE_CHECKING:
 
 
 if is_torch_hpu_available():
+    import habana_frameworks.torch.core as htcore
     from optimum.habana import GaudiTrainer as Trainer
     from optimum.habana.trl import GaudiDPOTrainer as DPOTrainer
 
@@ -200,7 +201,11 @@ class CustomDPOTrainer(DPOTrainer):
         if self.finetuning_args.use_ref_model:
             batch = nested_detach(batch, clone=True)  # avoid error
 
+        if is_torch_hpu_available():
+            htcore.mark_step()
         all_logits: torch.Tensor = model(**batch, return_dict=True, use_cache=False).logits.to(torch.float32)
+        if is_torch_hpu_available():
+            htcore.mark_step()
         all_logps, valid_length = get_batch_logps(
             logits=all_logits, labels=batch["labels"], ld_alpha=(self.ld_alpha if not is_ref_model else None)
         )
